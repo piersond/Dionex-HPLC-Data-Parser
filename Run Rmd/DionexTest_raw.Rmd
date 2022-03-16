@@ -1,0 +1,227 @@
+---
+title: "Lohse Lab Dionex Data Parser"
+author: "Derek Pierson"
+date: "3/15/2022"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=TRUE, echo=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(DT)
+
+setwd("C:/github/Dionex-HPLC-Data-Parser")
+source("get_data_ftn.R")
+source("calibrate_ftns.R")
+source("apply_cal_ftns.R")
+source("apply_dilution_factor_ftn.R")
+source("remove_tbl_dups_ftn.R")
+```
+
+## Lohse Lab Dionex Data Parser
+
+---
+
+<br/>
+ 
+**Calibration Standard Analyte Concentrations**
+
+<button class="btn btn-primary" data-toggle="collapse" data-target="#RawData"> Show/Hide Raw Data Tables</button>  
+<div id="RawData" class="collapse">  
+```{r, echo=TRUE}
+setwd("C:/github/Dionex-HPLC-Data-Parser")
+path_to_file <- "data/DionexTest_raw.xlsx"
+
+cal_vals <- suppressMessages(get_data(file_name = path_to_file)$cal_values)
+run_data <- suppressMessages(get_data(file_name = path_to_file)$run_data)
+
+datatable(cal_vals)
+
+```
+
+<br/>
+
+**Dionex Run Output **
+
+```{r, echo=TRUE}
+
+datatable(run_data) 
+
+```
+</div>
+
+<br/>
+
+### Generate calibration curves
+
+---
+
+By default, a low and high calibration curve is created using standards 1-4 and 4-8
+
+Notes: **Removed standard 8 due to inaccurate analysis**
+
+<button class="btn btn-primary" data-toggle="collapse" data-target="#CalCurves"> Show/Hide Calibration Curves</button>  
+<div id="CalCurves" class="collapse">  
+```{r echo=TRUE}
+### Generate table of calibration curves
+curves <- data.frame(analyte =      c(rep("Chloride", 2), rep("Nitrate", 2), rep("Sulfate", 2)),
+                     level =        rep(c("High", "Low"),3),
+                     ex_std_from =  rep(c(1,5),3),
+                     ex_std_to =    rep(c(3,8),3),
+                     rmv_std =      rep(c("Std 8"), 6)) 
+
+curves_all <- curves %>% split(1:nrow(curves)) %>% 
+                         map(~ generate_cal_curve(
+                                  analyte=.x$analyte,                    
+                                  cal_values = cal_vals, 
+                                  run_df = run_data,
+                                  remove_std = .x$rmv_std,
+                                  exclude_std = paste0("Std ", seq(from=.x$ex_std_from, to=.x$ex_std_to)))) %>%
+                         bind_rows() %>% 
+                         cbind(curves, .)
+```
+</div>
+
+
+```{r echo=TRUE}
+# Apply calibration to determine analyte concentrations
+run_conc_tbl <- apply_cal_to_run(cal_curves = curves_all, run_output = run_data)
+
+# Remove irrelevant columns
+run_conc_tbl2 <- run_conc_tbl %>% select(No., SampleID, Analyte, Area, Concentration, RNote) %>% mutate_if(is.numeric, ~round(., 3))
+```
+
+
+<br/>
+ 
+### Check Standard Accuracy
+ 
+---
+ 
+```{r echo=TRUE}
+check_df <- run_conc_tbl2 %>% filter(grepl("CHECK_", SampleID))
+
+unique_ions <- unique(run_conc_tbl2$Analyte)
+
+check_tbl_df <- check_df %>% select(No., SampleID, Analyte, Concentration)
+
+check_tbl_df$Accuracy <- round(check_tbl_df$Concentration/as.numeric(gsub("CHECK_", "", check_tbl_df$SampleID,"_")),3)*100
+
+check_tbl_df$Note <- ifelse(check_tbl_df$Accuracy < 95 | check_tbl_df$Accuracy > 105, "WARNING", "")
+  
+datatable(check_tbl_df, rownames = F,
+            options = list(
+              pageLength = 100))
+```
+
+<br/>
+
+### Data Tables
+
+---
+
+<button class="btn btn-primary" data-toggle="collapse" data-target="#BlockName"> Show/Hide raw data table</button>  
+<div id="BlockName" class="collapse">  
+```{r echo=TRUE}
+datatable(run_conc_tbl2, rownames = F,
+          extensions = 'Buttons', options = list(
+            pageLength = 100,
+            dom = 'Bfrtip',
+            buttons = 
+              list('copy', 'print', list(
+                extend = 'collection',
+                buttons = c('csv', 'excel', 'pdf'),
+                text = 'Download'
+            ))))
+```
+</div>
+
+<button class="btn btn-primary" data-toggle="collapse" data-target="#BlockName2"> Show/Hide summarized & dilution corrected data table</button>  
+<div id="BlockName2" class="collapse">  
+```{r echo=TRUE}
+# Apply dilution multipliers
+run_conc_tbl3 <- run_conc_tbl2 %>% split(1:nrow(run_conc_tbl2)) %>% map(apply_dil_factor) %>% bind_rows()  
+
+datatable(run_conc_tbl3, rownames = F,
+          extensions = 'Buttons', options = list(
+            pageLength = 100,
+            dom = 'Bfrtip',
+            buttons = 
+              list('copy', 'print', list(
+                extend = 'collection',
+                buttons = c('csv', 'excel', 'pdf'),
+                text = 'Download'
+            ))))
+
+```
+</div>
+ 
+<br/>
+
+<br/>
+ 
+## Finalized Data Table
+
+---
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#Isolate the unknown sample data
+
+ions <- unique(run_conc_tbl3$Analyte)
+
+final_data <- NA
+
+for(i in 1:length(ions)) {
+  unknowns_tbl <- run_conc_tbl3 %>% filter(Analyte == ions[i]) %>%
+                              filter(SampleID != "blank") %>%
+                              filter(SampleID != "Blank") %>% 
+                              filter(!grepl("CHECK_", SampleID)) %>%
+                              filter(!grepl("Std", SampleID)) %>%
+                              filter(!grepl("std", SampleID))
+  
+  # Add dilution factor column
+  unknowns_tbl$Dilution_Factor <- strsplit(unknowns_tbl$RNote, "factor x") %>%
+          do.call(rbind, .) %>%
+          as.data.frame() %>%
+          select(V2)
+  
+  unknowns_tbl$Dilution_Factor <- suppressWarnings(as.numeric(unlist(unknowns_tbl$Dilution_Factor)))
+  
+  output <- unique(unknowns_tbl$SampleID) %>% map(~remove_dups(uniqID = ., 
+                                                               tbl = unknowns_tbl)) %>% bind_rows()
+  
+  if(is.na(final_data)) {
+    final_data <- output
+  } else {
+    final_data <- left_join(final_data, output) #It is expected to get console message for this join
+  }
+}
+
+#Rearrange dataframe
+col_DilF_names <- colnames(final_data)[grepl("DilF",colnames(final_data))]
+col_Note_names <- colnames(final_data)[grepl("Note",colnames(final_data))]
+  
+final_data <- final_data[c("Run_Pos", "SampleID", ions, col_DilF_names, col_Note_names)]
+
+# Show data table in RmD
+datatable(final_data, rownames = F,
+          extensions = 'Buttons', options = list(
+            pageLength = 100,
+            dom = 'Bfrtip',
+            buttons = 
+              list('copy', 'print', list(
+                extend = 'collection',
+                buttons = c('csv', 'excel', 'pdf'),
+                text = 'Download'
+            ))))
+
+# Save datatable as .csv and .rds
+setwd("C:/github/Dionex-HPLC-Data-Parser")
+write.csv(final_data, "data/R_parsed_run_data.csv")
+saveRDS(final_data, "data/R_parsed_run_data.rds")
+
+```
+
+ 
