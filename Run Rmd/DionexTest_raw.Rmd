@@ -47,7 +47,8 @@ datatable(cal_vals)
 
 ```{r, echo=TRUE}
 
-datatable(run_data) 
+datatable(run_data, options = list(
+            pageLength = 100)) 
 
 ```
 </div>
